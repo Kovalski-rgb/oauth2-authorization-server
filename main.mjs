@@ -1,5 +1,5 @@
-const FACEBOOK_CLIENT_ID = '';
-const GOOGLE_CLIENT_ID = '';
+const FACEBOOK_CLIENT_ID = '183665647925442';
+const GOOGLE_CLIENT_ID = '836565875832-s9902g5vaatusnr4fg3bent1c7oqk5r3.apps.googleusercontent.com';
 
 import crypto from "crypto";
 import express from "express";
@@ -22,7 +22,7 @@ const facebookClient = new facebookIssuer.Client({
 
 // Configurações do EXPRESS
 const app = express();
-const port = 8080;
+const port = 8081;
 
 app.use(bodyParser.json());     // to support JSON-encoded bodies
 app.use(bodyParser.urlencoded({ // to support URL-encoded bodies
@@ -156,12 +156,13 @@ const authenticationMiddleware = (req, res, next) => {
     // Verifica se a sessão existe no banco de dados
     const sessionFB = DATABASE_FB.sessions[access_token];
     const sessionGL = DATABASE_GL.sessions[access_token];
-    if (!sessionFB && !sessionGL) {
+    const sessionOA = DATABASE_OAUTH.sessions[access_token];
+    if (!sessionFB && !sessionGL && !sessionOA) {
         res.status(401).json({ error: 'unauthorized' });
         return;
     }
 
-    // Verifica se alguma das sessões expiraramv
+    // Verifica se alguma das sessões expiraram
     if (sessionFB && Date.now() >= sessionFB.expires_at) {
         // Deleta a sessão do banco de dados
         delete DATABASE_FB.sessions[access_token];
@@ -172,6 +173,12 @@ const authenticationMiddleware = (req, res, next) => {
         // Deleta a sessão do banco de dados
         delete DATABASE_GL.sessions[access_token];
         res.status(401).json({ error: 'google session expired' });
+        return;
+    }
+    if (sessionOA && Date.now() >= sessionOA.expires_at) {
+        // Deleta a sessão do banco de dados
+        delete sessionOA.sessions[access_token];
+        res.status(401).json({ error: 'oauth session expired' });
         return;
     }
 
@@ -351,6 +358,112 @@ app.get('/oauth/codeChallenge', async (req, res) => {
     }
     res.status(200).json({ challenge_type, code_challenge, code_verifier });
 });
+
+// Mock de um banco de dados
+const DATABASE_OAUTH = {
+    codes: {},
+    challenges: {},
+    username: {},
+    sessions: {},
+};
+
+
+app.get('/oauth/authorize', async (req, res) => {
+    let { 
+        username, 
+        challenge, 
+        state, 
+        code_challenge_method 
+    } = req.body;
+    if(!username) {
+        res.status(400).json("Specify a username");
+        return;
+    }
+    if(code_challenge_method.startsWith("sha") && code_challenge_method.endsWith("256")){
+        code_challenge_method = "sha-256";
+    }else{
+        code_challenge_method = "plain";
+    }
+    let code = randomString(50);
+    DATABASE_OAUTH.codes[state] = code;
+    DATABASE_OAUTH.challenges[state] = { challenge, code_challenge_method };
+    DATABASE_OAUTH.username[state] = username;
+
+    res.status(200).json({authorization_code: DATABASE_OAUTH.codes[state], state});
+});
+
+app.post('/oauth/authorize', async (req, res) => {
+    let { 
+        code, 
+        verifier, 
+        state
+    } = req.body;
+
+    if(!DATABASE_OAUTH.codes[state]){
+        res.status(400).json("Invalid state");
+    }
+
+    if(DATABASE_OAUTH.codes[state]!==code){
+        res.status(400).json("Invalid code");
+    }
+
+    let db_challenge = DATABASE_OAUTH.challenges[state];
+
+    let db_verifier;
+    if(db_challenge.code_challenge_method === "sha-256"){
+        db_verifier = sha256(verifier).digest('base64url');
+    }else{
+        db_verifier = verifier;
+    }
+    if(db_verifier===db_challenge.challenge){
+    // Cria um access_token opaco para o usuário logado
+        const access_token = generators.random();
+        const access_token_expires_at = Date.now() + (24 * 60 * 60 * 1000); // expira em 24 horas
+
+    // Armazena o access_token no banco de dados
+    DATABASE_OAUTH.sessions[access_token] = {
+        user_id: DATABASE_OAUTH.username[state],
+        expires_at: access_token_expires_at,
+    };
+
+    DATABASE_OAUTH.username[access_token] = DATABASE_OAUTH.username[state];
+
+    // Retorna o access_token para o usuário logado
+    res.status(200).json({
+        access_token,
+        expires_at: access_token_expires_at,
+        token_type: 'Bearer'
+    });
+    }
+
+});
+
+// Exemplo de endpoint protegido
+app.get('/oauth/user-info', authenticationMiddleware, async (req, res) => {
+    const { session } = req;
+
+    // Le o id do usuário logado
+    const { user_id } = session;
+
+    // Le as informações do usuário do banco de dados
+    const user = DATABASE_OAUTH.username[user_id];
+
+    // Retorna as informações do usuário
+    if(user){
+        res.status(200).json(user)
+    }else{
+        res.status(200).json("User did not log in with its facebook account");
+    }
+});
+
+function randomString(length) {
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let output = "";
+    for (let i = 0; i < length; i++) {
+        output += alphabet.charAt(Math.floor(Math.random() * alphabet.length));
+    }
+    return output;
+}
 
 app.listen(port, () => {
     console.log(`App listening at http://localhost:${port}`)
